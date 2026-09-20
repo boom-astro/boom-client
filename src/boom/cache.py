@@ -141,6 +141,57 @@ class Cache:
         path.parent.mkdir(parents=True, exist_ok=True)
         _atomic_write(path, lambda tmp: frame.to_parquet(tmp, index=False))
 
+    def load_frames(
+        self, namespace: str, *, fresh_only: bool = False
+    ) -> pd.DataFrame:
+        """Concatenate every Parquet entry in a namespace into one table.
+
+        This is how a cache built one object at a time becomes a sample:
+        ``load_frames("sources")`` gives one row per cached source, with
+        its summary statistics, ready to filter and plot.
+
+        Parameters
+        ----------
+        namespace : str
+            Which namespace to read, e.g. ``"sources"`` or
+            ``"photometry"``.
+        fresh_only : bool
+            Skip entries older than *max_age*. Off by default: a bulk
+            load usually wants everything on disk, and silently dropping
+            half a sample is worse than reading a stale row.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Empty when the cache is off or the namespace has no entries.
+        """
+        if self.directory is None:
+            return pd.DataFrame()
+        folder = self.directory / _slug(namespace)
+        if not folder.is_dir():
+            return pd.DataFrame()
+
+        frames = []
+        for path in sorted(folder.glob("*.parquet")):
+            if fresh_only and self._fresh(path) is None:
+                continue
+            try:
+                frames.append(pd.read_parquet(path))
+            except (OSError, ValueError):
+                continue
+        if not frames:
+            return pd.DataFrame()
+        return pd.concat(frames, ignore_index=True)
+
+    def keys(self, namespace: str) -> list[str]:
+        """Entry names stored in a namespace, sorted."""
+        if self.directory is None:
+            return []
+        folder = self.directory / _slug(namespace)
+        if not folder.is_dir():
+            return []
+        return sorted(path.stem for path in folder.iterdir() if path.is_file())
+
     def clear(self, namespace: str | None = None) -> None:
         """Delete a namespace, or the whole cache when *namespace* is None."""
         if self.directory is None:

@@ -244,6 +244,14 @@ Layout under the cache directory, all keyed by object id:
 Writes go through a temporary file, so an interrupted run leaves no half
 entry, and a corrupt or stale file reads as a miss rather than an error.
 
+A cache built one object at a time reads back as a sample:
+
+```python
+cache.load_frames("sources")       # one row per cached source, with summaries
+cache.load_frames("photometry")    # every measurement of every cached source
+cache.keys("sources")              # what is on disk
+```
+
 Raw queries are never cached: caching arbitrary Mongo filters keyed by
 their own text is a good way to serve stale results without noticing.
 

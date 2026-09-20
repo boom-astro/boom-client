@@ -117,3 +117,53 @@ def test_no_temporary_file_is_left_behind(tmp_path):
 def test_repr_mentions_whether_it_is_on(tmp_path):
     assert repr(Cache()) == "Cache(disabled)"
     assert "max_age" in repr(Cache(tmp_path))
+
+
+# ---- bulk reads ----
+
+
+def test_load_frames_concatenates_a_namespace(tmp_path):
+    cache = Cache(tmp_path)
+    for i, name in enumerate(["ZTF18a", "ZTF18b", "ZTF18c"]):
+        cache.set_frame(
+            "sources", name, pd.DataFrame([{"objectid": name, "n": i}])
+        )
+    table = cache.load_frames("sources")
+    assert len(table) == 3
+    assert sorted(table["objectid"]) == ["ZTF18a", "ZTF18b", "ZTF18c"]
+
+
+def test_load_frames_keeps_stale_entries_by_default(tmp_path):
+    cache = Cache(tmp_path, max_age=1)
+    cache.set_frame(
+        "sources", "ZTF18a", pd.DataFrame([{"objectid": "ZTF18a"}])
+    )
+    os.utime(cache.path("sources", "ZTF18a", ".parquet"), (0, 0))
+    assert len(cache.load_frames("sources")) == 1
+    assert cache.load_frames("sources", fresh_only=True).empty
+
+
+def test_load_frames_on_an_unknown_namespace_is_empty(tmp_path):
+    assert Cache(tmp_path).load_frames("nope").empty
+
+
+def test_load_frames_on_a_disabled_cache_is_empty():
+    assert Cache().load_frames("sources").empty
+
+
+def test_load_frames_skips_a_corrupt_entry(tmp_path):
+    cache = Cache(tmp_path)
+    cache.set_frame("sources", "good", pd.DataFrame([{"objectid": "good"}]))
+    (tmp_path / "sources" / "bad.parquet").write_text("not parquet")
+    assert len(cache.load_frames("sources")) == 1
+
+
+def test_keys_lists_what_is_stored(tmp_path):
+    cache = Cache(tmp_path)
+    cache.set_json("objects", "ZTF18b", {"a": 1})
+    cache.set_json("objects", "ZTF18a", {"a": 1})
+    assert cache.keys("objects") == ["ZTF18a", "ZTF18b"]
+
+
+def test_keys_on_a_disabled_cache_is_empty():
+    assert Cache().keys("objects") == []
