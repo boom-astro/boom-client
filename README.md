@@ -4,16 +4,17 @@ Python client for the **main BOOM API**: free-form Mongo queries over the
 catalogs, cone searches, aggregation pipelines and cutouts.
 
 ```python
-from boom import BoomClient, get_object, photometry, plot_lightcurve
+from boom import BoomClient, get_source
 
 client = BoomClient()                      # reads BOOM_API_USER / BOOM_API_PASSWORD
 
 client.catalog_names()
 # ['LSST_alerts', 'LSST_alerts_aux', 'ZTF_alerts', 'ZTF_alerts_aux', ...]
 
-obj = get_object(client, "ZTF", "ZTF18abcdefg")
-plot_lightcurve(obj)
-photometry(obj).head()
+src = get_source(client, "ZTF", "ZTF18abcdefg")
+src.ndethist, src.peak_mag, src.age, src.redshift
+src.plot_lightcurve()
+src.get_detections()
 ```
 
 ## Is this the package you want?
@@ -26,6 +27,7 @@ BOOM exposes two APIs, with two account systems.
 | Account | free self-service signup | provisioned by an admin |
 | Auth | `BABAMUL_API_TOKEN` (`bbml_…`) | username and password |
 | Surface | fixed endpoints: alerts, objects, cutouts, cone search | arbitrary `find`, `count`, `pipeline` on any readable catalog |
+| Analysis | alert models and plotting | the same, plus typed sources, cleaned photometry and a disk cache |
 | Real-time | yes, Kafka streams | no, pull only |
 
 If you signed up on the Babamul website, you want
@@ -93,10 +95,20 @@ client.count("ZTF_alerts", {"objectId": "ZTF18abcdefg"})  # exact, uses the inde
 client.estimated_count("ZTF_alerts")                      # metadata only, instant
 ```
 
-### cone_search
+### cone_search and near_search
 
-Accepts a `SkyCoord`, an `(ra, dec)` pair, a list of pairs, or a
-`{name: (ra, dec)}` mapping. Results come back keyed the same way.
+Two different questions. `cone_search` answers "everything inside this
+radius", in no particular order, for many positions at once. `near_search`
+answers "what is closest", one position at a time, and tags each result
+with a `distance_arcsec`. Cross-matching wants the second.
+
+```python
+client.near_search("NED", 189.1, 28.4, radius_arcsec=10)
+# [{'_id': 'NGC1234', 'z': 0.031, ..., 'distance_arcsec': 2.3}, ...]
+```
+
+`cone_search` accepts a `SkyCoord`, an `(ra, dec)` pair, a list of pairs,
+or a `{name: (ra, dec)}` mapping. Results come back keyed the same way.
 
 ```python
 import astropy.units as u
@@ -131,43 +143,106 @@ client.catalog_indexes("ZTF_alerts")       # check before a big find
 client.catalog_sample("ZTF_alerts", 3)     # random documents, to see the schema
 ```
 
-## Objects and photometry
+## Objects, sources and photometry
 
 An object's data is split across two collections: `{SURVEY}_alerts` holds
 one document per alert, `{SURVEY}_alerts_aux` holds the full photometric
-history and the cross-matches. `get_object` joins them into the shape the
-`babamul` tools already read.
+history and the cross-matches. There are two levels on top of that join.
+
+### get_object: the raw document
+
+Merges the two, in the shape the `babamul` tools already read, and finds
+the counterpart in the other survey, by recorded alias where there is one
+and by position otherwise.
 
 ```python
-from boom import get_object, photometry, plot_lightcurve, plot_cutouts
+from boom import get_object, plot_lightcurve, plot_cutouts
 
 obj = get_object(client, "ZTF", "ZTF18abcdefg")
 obj["prv_candidates"], obj["fp_hists"], obj["cross_matches"]
-obj["survey_matches"]["lsst"]       # same source in LSST, within 2 arcsec
+obj["survey_matches"]["lsst"]
 
 plot_lightcurve(obj)
 plot_cutouts(client, "ZTF", object_id="ZTF18abcdefg", which="brightest")
-
-df = photometry(obj)   # mjd, mag, magerr, band, lim, survey, origin
 ```
 
-`photometry` merges the alert history, the forced photometry and the
-non-detection upper limits, across both surveys when a match was found.
+Only the fields this package reads are requested, since an untrimmed aux
+document for an old ZTF object runs to megabytes. Pass `trim=False` for
+everything, or use `boom.projections` to build your own.
+
+### get_source: the typed source
+
+```python
+from boom import get_source
+
+src = get_source(client, "ZTF", "ZTF18abcdefg")
+
+src.objectid, src.ztfid, src.lsstid       # identity across surveys
+src.ra, src.dec, src.jd
+src.redshift, src.redshift_origin         # host, from the cross-matches
+src.offset, src.host_origin               # separation to that host
+
+src.ndethist, src.ndetfilters, src.filters
+src.jdstarthist, src.jdendhist, src.age
+src.peak_mag, src.median_ra, src.median_dec
+
+src.get_photometry()                      # everything
+src.get_detections(min_snr=5.0)           # real, positive detections only
+src.plot_lightcurve()
+src.to_json(), Source.from_json(blob)
+```
+
+### The photometry table
+
+Both `photometry(obj)` and `Source.get_photometry()` return the same
+schema, one row per measurement:
+
+| column | meaning |
+|---|---|
+| `jd`, `mjd` | epoch |
+| `band` | filter |
+| `magpsf`, `sigmapsf` | PSF magnitude and its error |
+| `diffmaglim` | limiting magnitude of the visit |
+| `snr` | signal to noise |
+| `ra`, `dec` | measured position |
+| `psf_flux`, `psf_flux_err` | difference flux |
+| `isdiffpos` | the difference is positive, i.e. the source brightened |
+| `det_type` | `alert`, `fp` (forced photometry) or `ul` (upper limit) |
+| `survey` | which survey produced the row |
+
+The three histories overlap in time, so epochs already reported as alerts
+are dropped from the forced photometry and the upper limits. Rows the
+survey flags as unusable are dropped too: low real-bogus score, too many
+bad pixels or a shallow limit for ZTF, the reliability and artefact flags
+for LSST. Pass `quality_cuts=False` to see everything the pipeline stored,
+and read `boom.photometry.CUTS` for the exact thresholds.
 
 ## Caching
 
-Off unless `BOOM_CACHE_DIR` is set. Objects are stored as JSON and
-DataFrames as Parquet, keyed by object id, and entries expire after
+Off unless `BOOM_CACHE_DIR` is set. Entries expire after
 `BOOM_CACHE_MAX_AGE` (a day by default) because alert catalogs keep
 growing and a permanently cached object would hide new photometry.
 
 ```python
-from boom import Cache
+from boom import Cache, Source
 
 cache = Cache("~/.cache/boom", max_age=3600)
-obj = get_object(client, "ZTF", "ZTF18abcdefg", cache=cache)
-cache.clear("objects")
+src = get_source(client, "ZTF", "ZTF18abcdefg", cache=cache)
+Source.load(cache, "ZTF18abcdefg")
+cache.clear("sources")
 ```
+
+Layout under the cache directory, all keyed by object id:
+
+| namespace | format | holds |
+|---|---|---|
+| `objects/` | JSON | merged alert and history documents |
+| `sources/` | Parquet | one row of source metadata and summaries |
+| `photometry/` | Parquet | the measurement table |
+| `crossmatches/` | JSON | the cross-match documents |
+
+Writes go through a temporary file, so an interrupted run leaves no half
+entry, and a corrupt or stale file reads as a miss rather than an error.
 
 Raw queries are never cached: caching arbitrary Mongo filters keyed by
 their own text is a good way to serve stale results without noticing.

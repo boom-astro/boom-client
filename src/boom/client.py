@@ -11,6 +11,7 @@ from functools import lru_cache
 from typing import Any, Literal, cast
 
 import httpx
+import numpy as np
 
 from .config import (
     DEFAULT_BACKOFF_FACTOR,
@@ -37,6 +38,10 @@ DEFAULT_MAX_TIME_MS = 60_000
 
 #: Rows fetched per request by :meth:`BoomClient.iter_find`.
 DEFAULT_PAGE_SIZE = 1000
+
+#: Mean Earth radius in metres. Mongo measures ``$nearSphere`` distances on
+#: a sphere of this size, so an angular radius has to be converted.
+EARTH_RADIUS_M = 6371008.8
 
 RETRY_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 
@@ -528,6 +533,62 @@ class BoomClient:
             ),
         )
 
+    def near_search(
+        self,
+        catalog: str,
+        ra: float,
+        dec: float,
+        radius_arcsec: float = 1.0,
+        *,
+        filter: dict[str, Any] | None = None,
+        projection: dict[str, Any] | None = None,
+        limit: int | None = 1,
+        max_time_ms: int | None = DEFAULT_MAX_TIME_MS,
+    ) -> list[dict[str, Any]]:
+        """Search around one position, nearest match first.
+
+        :meth:`cone_search` answers "everything inside this radius" in no
+        particular order. This answers "what is closest", which is what a
+        cross-match wants, by running a ``$nearSphere`` query through
+        :meth:`find`. Each result carries a ``distance_arcsec`` field.
+
+        Parameters
+        ----------
+        catalog : str
+            Catalog name. It needs a 2dsphere index on
+            ``coordinates.radec_geojson``, which the alert, aux and
+            cross-match catalogs have.
+        ra, dec : float
+            Centre of the search, in degrees.
+        radius_arcsec : float
+            Maximum separation to consider.
+        limit : int | None
+            How many neighbours to return, closest first. ``None`` returns
+            every match inside the radius.
+        """
+        near = {
+            "coordinates.radec_geojson": {
+                "$nearSphere": {
+                    "$geometry": {
+                        "type": "Point",
+                        "coordinates": [ra - 180.0, dec],
+                    },
+                    "$maxDistance": arcsec_to_metres(radius_arcsec),
+                }
+            }
+        }
+        if filter:
+            near.update(filter)
+
+        matches = self.find(
+            catalog,
+            near,
+            projection=projection,
+            limit=limit,
+            max_time_ms=max_time_ms,
+        )
+        return [_with_separation(match, ra, dec) for match in matches]
+
     def pipeline(
         self,
         catalog: str,
@@ -659,6 +720,30 @@ class BoomClient:
         return _unwrap(response, "/")
 
 
+def arcsec_to_metres(radius_arcsec: float) -> float:
+    """Convert an angular radius into the metres ``$nearSphere`` expects."""
+    return float(np.deg2rad(radius_arcsec / 3600.0) * EARTH_RADIUS_M)
+
+
+def _with_separation(
+    match: dict[str, Any], ra: float, dec: float
+) -> dict[str, Any]:
+    """Annotate a match with its angular separation from the search centre."""
+    coordinates = (match.get("coordinates") or {}).get("radec_geojson") or {}
+    pair = coordinates.get("coordinates")
+    if not pair or len(pair) != 2:
+        return match
+
+    from astropy.coordinates import SkyCoord
+
+    centre = SkyCoord(ra, dec, unit="deg")
+    other = SkyCoord(pair[0] + 180.0, pair[1], unit="deg")
+    return {
+        **match,
+        "distance_arcsec": float(centre.separation(other).arcsec),
+    }
+
+
 def _normalize_sort(
     sort: dict[str, Any] | list[tuple[str, int]] | None,
 ) -> dict[str, Any] | None:
@@ -721,8 +806,10 @@ __all__ = [
     "ConfigurationError",
     "DEFAULT_MAX_TIME_MS",
     "DEFAULT_PAGE_SIZE",
+    "EARTH_RADIUS_M",
     "Survey",
     "WhichCutouts",
+    "arcsec_to_metres",
     "get_user_agent",
     "normalize_coordinates",
     "normalize_radius",

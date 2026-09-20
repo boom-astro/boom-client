@@ -10,7 +10,7 @@ from __future__ import annotations
 import astropy.units as u
 from astropy.coordinates import SkyCoord
 
-from boom import BoomClient, Cache, get_object, photometry
+from boom import BoomClient, Cache, get_source
 from boom.exceptions import APINotFoundError
 
 
@@ -46,15 +46,18 @@ def main() -> None:
             candidate = alert["candidate"]
             print(f"  jd={candidate['jd']} mag={candidate['magpsf']}")
 
-        print(f"\nfull object for {object_id}:")
-        obj = get_object(
+        print(f"\nfull source for {object_id}:")
+        src = get_source(
             client, "ZTF", object_id, cache=Cache("~/.cache/boom")
         )
-        table = photometry(obj)
-        print(f"  {len(table)} photometry points")
-        print(table.head().to_string(index=False))
+        print(f"  {src.ndethist} detections in {src.filters}")
+        print(f"  peak mag {src.peak_mag:.2f}, {src.age:.1f} days old")
+        print(
+            f"  host {src.host_origin} at {src.offset} arcsec, z={src.redshift}"
+        )
+        print(src.get_detections().head().to_string(index=False))
 
-        radec = obj["candidate"]["ra"], obj["candidate"]["dec"]
+        radec = src.ra, src.dec
         print(f"\nneighbours within 30 arcsec of {radec}:")
         results = client.cone_search(
             "ZTF_alerts_aux",
@@ -64,6 +67,10 @@ def main() -> None:
         )
         for neighbour in results["0"]:
             print(f"  {neighbour['_id']}")
+
+        print("\nnearest catalogued galaxy:")
+        for match in client.near_search("NED", *radec, radius_arcsec=30):
+            print(f"  {match['_id']} at {match['distance_arcsec']:.1f} arcsec")
 
         print("\nbusiest objects of the last night:")
         for row in client.pipeline(

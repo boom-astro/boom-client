@@ -11,6 +11,7 @@ from astropy.coordinates import SkyCoord
 
 from boom.client import (
     BoomClient,
+    arcsec_to_metres,
     get_user_agent,
     normalize_coordinates,
     normalize_radius,
@@ -300,6 +301,59 @@ def test_cone_search_accepts_a_skycoord(client, api):
         "ZTF_alerts_aux", SkyCoord(12.0, -30.0, unit="deg"), 2, "arcsec"
     )
     assert api.body()["object_coordinates"] == {"0": [12.0, -30.0]}
+
+
+# ---- near search ----
+
+
+def test_near_search_builds_a_nearsphere_filter(client, api):
+    api.route("/queries/find", [])
+    client.near_search("NED", 12.0, -30.0, 5.0)
+    near = api.body()["filter"]["coordinates.radec_geojson"]["$nearSphere"]
+    assert near["$geometry"]["coordinates"] == [12.0 - 180.0, -30.0]
+    assert near["$maxDistance"] == pytest.approx(
+        arcsec_to_metres(5.0), rel=1e-9
+    )
+
+
+def test_arcsec_to_metres_matches_one_arcminute():
+    assert arcsec_to_metres(60.0) == pytest.approx(1853.2, rel=1e-3)
+
+
+def test_near_search_reports_the_separation(client, api):
+    api.route(
+        "/queries/find",
+        [
+            {
+                "_id": "NGC1234",
+                "coordinates": {
+                    "radec_geojson": {
+                        "type": "Point",
+                        "coordinates": [12.0 - 180.0, -30.0 + 1 / 3600],
+                    }
+                },
+            }
+        ],
+    )
+    match = client.near_search("NED", 12.0, -30.0, 5.0)[0]
+    assert match["distance_arcsec"] == pytest.approx(1.0, abs=0.01)
+
+
+def test_near_search_leaves_a_positionless_match_alone(client, api):
+    api.route("/queries/find", [{"_id": "NGC1234"}])
+    assert client.near_search("NED", 12.0, -30.0)[0] == {"_id": "NGC1234"}
+
+
+def test_near_search_merges_an_extra_filter(client, api):
+    api.route("/queries/find", [])
+    client.near_search("NED", 12.0, -30.0, filter={"z": {"$gt": 0.01}})
+    assert api.body()["filter"]["z"] == {"$gt": 0.01}
+
+
+def test_near_search_defaults_to_the_single_nearest(client, api):
+    api.route("/queries/find", [])
+    client.near_search("NED", 12.0, -30.0)
+    assert api.body()["limit"] == 1
 
 
 # ---- catalogs ----

@@ -11,6 +11,8 @@ import pytest
 
 from boom.client import BoomClient
 
+from .fixtures import CATALOGS
+
 
 class FakeApi:
     """Records requests and replies with whatever the test registered."""
@@ -84,6 +86,45 @@ class FakeApi:
 @pytest.fixture
 def api() -> FakeApi:
     return FakeApi()
+
+
+@pytest.fixture
+def boom(api: FakeApi) -> FakeApi:
+    """A fake API serving the catalogs from :mod:`tests.fixtures`."""
+
+    def find(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        documents = CATALOGS.get(body["catalog_name"], [])
+        documents = [
+            document
+            for document in documents
+            if _matches(document, body.get("filter") or {})
+        ]
+        limit = body.get("limit")
+        return httpx.Response(
+            200,
+            json={
+                "message": "ok",
+                "data": documents[:limit] if limit else documents,
+            },
+        )
+
+    api.route("/queries/find", handler=find)
+    return api
+
+
+def _matches(document: Any, filter: dict[str, Any]) -> bool:
+    """Support the handful of filter shapes the package actually sends."""
+    for key, expected in filter.items():
+        if key.startswith("$") or key == "coordinates.radec_geojson":
+            continue
+        actual = document.get(key)
+        if isinstance(expected, dict):
+            if "$eq" in expected and actual != expected["$eq"]:
+                return False
+        elif actual != expected:
+            return False
+    return True
 
 
 @pytest.fixture
