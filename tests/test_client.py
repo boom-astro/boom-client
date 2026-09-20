@@ -460,3 +460,13 @@ def test_client_works_as_a_context_manager(api):
 
 def test_repr_does_not_leak_the_password(client):
     assert "secret" not in repr(client)
+
+
+def test_a_malformed_query_is_not_retried(client, api):
+    api.route(
+        "/queries/find", status=500, message="BadValue: unknown operator"
+    )
+    with pytest.raises(APIError) as excinfo:
+        client.find("ZTF_alerts", {"$bogus": 1})
+    assert excinfo.value.status_code == 500
+    assert api.paths().count("/queries/find") == 1

@@ -43,7 +43,11 @@ DEFAULT_PAGE_SIZE = 1000
 #: a sphere of this size, so an angular radius has to be converted.
 EARTH_RADIUS_M = 6371008.8
 
-RETRY_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+#: Statuses worth a second try. 500 is deliberately absent: this API
+#: answers a malformed filter or pipeline with 500, so retrying one costs
+#: five round-trips against production Mongo and delays the error by
+#: seconds without ever succeeding.
+RETRY_STATUS_CODES = frozenset({429, 502, 503, 504})
 
 _UNITS = {
     "deg": "Degrees",

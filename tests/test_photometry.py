@@ -45,17 +45,6 @@ def test_survey_column_is_stamped():
     assert set(build_photometry(LSST_AUX, "LSST")["survey"]) == {"LSST"}
 
 
-def test_flux_sign_drives_isdiffpos():
-    document = {
-        "prv_candidates": [
-            ztf_point(2460000.5, psfFlux=120.0),
-            ztf_point(2460001.5, psfFlux=-40.0),
-        ]
-    }
-    frame = build_photometry(document, "ZTF")
-    assert list(frame["isdiffpos"]) == [True, False]
-
-
 def test_ztf_string_isdiffpos_is_understood_without_flux():
     document = {
         "prv_candidates": [
@@ -97,7 +86,6 @@ def test_ztf_drops_flagged_rows(bad):
         {"isDipole": True},
         {"centroid_flag": True},
         {"psfFlux_flag": True},
-        {"isNegative": True},
         {"pixelFlags": True},
         {"glint_trail": True},
     ],
@@ -127,3 +115,50 @@ def test_dtypes_survive_a_parquet_round_trip(tmp_path):
     path = tmp_path / "photometry.parquet"
     frame.to_parquet(path, index=False)
     pd.testing.assert_frame_equal(pd.read_parquet(path), frame)
+
+
+def test_stored_isdiffpos_wins_over_the_flux_sign():
+    document = {
+        "prv_candidates": [
+            ztf_point(2460000.5, isdiffpos="t", psfFlux=-5.0),
+            ztf_point(2460001.5, isdiffpos="f", psfFlux=5.0),
+        ]
+    }
+    frame = build_photometry(document, "ZTF")
+    assert list(frame["isdiffpos"]) == [True, False]
+
+
+def test_flux_sign_fills_in_a_missing_isdiffpos():
+    rows = [
+        {k: v for k, v in ztf_point(2460000.5).items() if k != "isdiffpos"},
+        {
+            **{
+                k: v
+                for k, v in ztf_point(2460001.5).items()
+                if k != "isdiffpos"
+            },
+            "psfFlux": -5.0,
+        },
+    ]
+    frame = build_photometry({"prv_candidates": rows}, "ZTF")
+    assert list(frame["isdiffpos"]) == [True, False]
+
+
+def test_upper_limits_are_not_positive_differences():
+    frame = build_photometry(ZTF_AUX, "ZTF")
+    limits = frame[frame["det_type"] == "ul"]
+    assert not limits.empty
+    assert not limits["isdiffpos"].any()
+
+
+def test_negative_differences_are_kept_not_cut():
+    document = {
+        "prv_candidates": [
+            lsst_point(
+                2460000.5, isNegative=True, isdiffpos=False, psfFlux=-90.0
+            )
+        ]
+    }
+    frame = build_photometry(document, "LSST")
+    assert len(frame) == 1
+    assert not frame["isdiffpos"].iloc[0]

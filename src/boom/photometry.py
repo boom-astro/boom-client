@@ -60,10 +60,13 @@ ZTF_CUTS = QualityCuts(
 )
 
 #: LSST already flags its own problems, so the cut is mostly a flag sweep.
+#: ``isNegative`` is deliberately absent: it records the sign of the
+#: difference, not a defect, and it is already carried by ``isdiffpos``.
+#: Cutting on it would delete every fading epoch, which on a variable
+#: source is most of the light curve.
 LSST_CUTS = QualityCuts(
     flags=(
         "centroid_flag",
-        "isNegative",
         "psfFlux_flag",
         "isDipole",
         "pixelFlags",
@@ -165,13 +168,7 @@ def _finalize(frame: pd.DataFrame, survey: str) -> pd.DataFrame:
 
     if "snr" not in frame.columns:
         frame["snr"] = np.nan
-    if "psf_flux" in frame.columns:
-        flux = pd.to_numeric(frame["psf_flux"], errors="coerce")
-        frame["isdiffpos"] = flux > 0.0
-    elif "isdiffpos" in frame.columns:
-        frame["isdiffpos"] = frame["isdiffpos"].map(_as_bool)
-    else:
-        frame["isdiffpos"] = pd.NA
+    frame["isdiffpos"] = _difference_sign(frame)
 
     frame["mjd"] = pd.to_numeric(frame["jd"], errors="coerce") - 2400000.5
 
@@ -183,11 +180,36 @@ def _finalize(frame: pd.DataFrame, survey: str) -> pd.DataFrame:
     return apply_photometry_dtypes(frame)
 
 
+def _difference_sign(frame: pd.DataFrame) -> pd.Series[Any]:
+    """Whether each measurement is a positive difference.
+
+    The surveys record this directly, so the stored value wins. The flux
+    sign only fills the gaps: upper limits carry neither field, and older
+    records may predate one of them.
+    """
+    stored: pd.Series[Any] = (
+        frame["isdiffpos"].map(_as_bool)
+        if "isdiffpos" in frame.columns
+        else pd.Series(pd.NA, index=frame.index, dtype="object")
+    )
+    if "psf_flux" not in frame.columns:
+        return stored
+    derived = pd.to_numeric(frame["psf_flux"], errors="coerce") > 0.0
+    return stored.where(stored.notna(), derived)
+
+
 def _as_bool(value: Any) -> Any:
-    """ZTF writes isdiffpos as ``"t"``/``"f"``, LSST as a real boolean."""
+    """ZTF writes isdiffpos as ``"t"``/``"f"``, LSST as a real boolean.
+
+    A missing value has to come back as ``pd.NA`` rather than go through
+    ``bool()``: a float NaN is truthy, so a row that merely lacks the
+    field would otherwise read as a positive difference.
+    """
     if isinstance(value, str):
         return value.lower() in {"t", "true", "1"}
-    return bool(value) if value is not None else pd.NA
+    if value is None or pd.isna(value):
+        return pd.NA
+    return bool(value)
 
 
 def _empty() -> pd.DataFrame:

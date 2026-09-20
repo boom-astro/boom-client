@@ -213,9 +213,16 @@ schema, one row per measurement:
 The three histories overlap in time, so epochs already reported as alerts
 are dropped from the forced photometry and the upper limits. Rows the
 survey flags as unusable are dropped too: low real-bogus score, too many
-bad pixels or a shallow limit for ZTF, the reliability and artefact flags
-for LSST. Pass `quality_cuts=False` to see everything the pipeline stored,
-and read `boom.photometry.CUTS` for the exact thresholds.
+bad pixels or a shallow limit for ZTF, low reliability and the dipole,
+centroid, pixel and glint flags for LSST. Pass `quality_cuts=False` to see
+everything the pipeline stored, and read `boom.photometry.CUTS` for the
+exact thresholds.
+
+A negative difference is not a cut. LSST's `isNegative` and ZTF's
+`isdiffpos` record that the source faded relative to the reference, which
+is a measurement, not a defect: those rows stay in the table, flagged by
+`isdiffpos`, and it is `get_detections()` that leaves them out. Cutting
+them earlier would delete most of a variable source's light curve.
 
 ## Caching
 
@@ -265,6 +272,12 @@ their own text is a good way to serve stale results without noticing.
 - **`$out` and `$merge` write to the database.** The server passes
   pipeline stages straight to Mongo with no allowlist. This client
   refuses those two stages; everything else is on you.
+- **A malformed query comes back as 500, not 400.** The server hands the
+  filter to Mongo and wraps the resulting error in a 500, so this client
+  does not retry 500 at all: retrying a syntax error would cost five
+  round-trips against production Mongo and delay the message by twenty
+  seconds without ever succeeding. Transient 502, 503, 504 and 429 are
+  still retried.
 - **404 also means "no access".** Catalogs beginning with `watchlist_`
   are gated per account, and the API answers 404 rather than 403 for
   them, so `APINotFoundError` can mean either.
