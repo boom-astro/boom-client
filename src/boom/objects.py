@@ -271,7 +271,7 @@ def get_source(
     cache = cache if cache is not None else Cache.from_env()
 
     stored = Source.load(cache, object_id)
-    if stored is not None:
+    if stored is not None and stored.survey == survey:
         return stored
 
     obj = get_object(client, survey, object_id, cache=cache)

@@ -243,3 +243,14 @@ def test_sources_are_cached(client, boom, tmp_path):
     assert len(boom.requests) == before
     assert restored.objectid == ZTF_ID
     assert restored.lsstid == LSST_ID
+
+
+def test_a_cached_source_from_another_survey_is_ignored(
+    client, boom, tmp_path
+):
+    cache = Cache(tmp_path)
+    get_source(client, "ZTF", ZTF_ID, cache=cache)
+    stored = cache.get_frame("sources", ZTF_ID)
+    stored["survey"] = "LSST"
+    cache.set_frame("sources", ZTF_ID, stored)
+    assert get_source(client, "ZTF", ZTF_ID, cache=cache).survey == "ZTF"
