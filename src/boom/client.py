@@ -39,6 +39,9 @@ DEFAULT_MAX_TIME_MS = 60_000
 #: Rows fetched per request by :meth:`BoomClient.iter_find`.
 DEFAULT_PAGE_SIZE = 1000
 
+#: Most positions the API accepts in one cone search request.
+MAX_CONE_SEARCH_POSITIONS = 10_000
+
 #: Mean Earth radius in metres. Mongo measures ``$nearSphere`` distances on
 #: a sphere of this size, so an angular radius has to be converted.
 EARTH_RADIUS_M = 6371008.8
@@ -140,7 +143,7 @@ def normalize_coordinates(
     if (
         isinstance(coordinates, Sequence)
         and len(coordinates) == 2
-        and all(isinstance(v, (int, float)) for v in coordinates)
+        and all(isinstance(v, int | float) for v in coordinates)
     ):
         return {"0": [float(coordinates[0]), float(coordinates[1])]}
 
@@ -510,32 +513,38 @@ class BoomClient:
         -------
         dict
             One entry per input position, keyed by its name (or its index
-            for unnamed input), holding the matching documents.
+            for unnamed input), holding the matching documents. More than
+            :data:`MAX_CONE_SEARCH_POSITIONS` positions are sent as several
+            requests and merged.
         """
         value, api_unit = normalize_radius(radius, unit)
-        return cast(
-            dict[str, list[dict[str, Any]]],
-            self._request(
-                "POST",
-                "/queries/cone_search",
-                json=_drop_none(
-                    {
-                        "catalog_name": catalog,
-                        "object_coordinates": normalize_coordinates(
-                            coordinates
-                        ),
-                        "radius": value,
-                        "unit": api_unit,
-                        "filter": filter,
-                        "projection": projection,
-                        "limit": limit,
-                        "skip": skip,
-                        "sort": _normalize_sort(sort),
-                        "max_time_ms": max_time_ms or None,
-                    }
-                ),
-            ),
-        )
+        positions = list(normalize_coordinates(coordinates).items())
+        results: dict[str, list[dict[str, Any]]] = {}
+        for start in range(
+            0, max(len(positions), 1), MAX_CONE_SEARCH_POSITIONS
+        ):
+            batch = dict(positions[start : start + MAX_CONE_SEARCH_POSITIONS])
+            results.update(
+                self._request(
+                    "POST",
+                    "/queries/cone_search",
+                    json=_drop_none(
+                        {
+                            "catalog_name": catalog,
+                            "object_coordinates": batch,
+                            "radius": value,
+                            "unit": api_unit,
+                            "filter": filter,
+                            "projection": projection,
+                            "limit": limit,
+                            "skip": skip,
+                            "sort": _normalize_sort(sort),
+                            "max_time_ms": max_time_ms or None,
+                        }
+                    ),
+                )
+            )
+        return results
 
     def near_search(
         self,
@@ -811,6 +820,7 @@ __all__ = [
     "DEFAULT_MAX_TIME_MS",
     "DEFAULT_PAGE_SIZE",
     "EARTH_RADIUS_M",
+    "MAX_CONE_SEARCH_POSITIONS",
     "Survey",
     "WhichCutouts",
     "arcsec_to_metres",
