@@ -32,8 +32,8 @@ logger = logging.getLogger(__name__)
 Survey = Literal["ZTF", "LSST", "DECAM", "WINTER"]
 WhichCutouts = Literal["first", "last", "brightest", "faintest"]
 
-#: Sent with every query unless overridden. The API applies no server-side
-#: limit, so an unselective filter would otherwise run until Mongo gives up.
+#: Sent with every query unless overridden. Without one the API stops a query
+#: after 30 s.
 DEFAULT_MAX_TIME_MS = 60_000
 
 #: Rows fetched per request by :meth:`BoomClient.iter_find`.
@@ -375,7 +375,8 @@ class BoomClient:
         sort : dict | list[tuple[str, int]] | None
             Sort specification, e.g. ``{"candidate.jd": -1}``.
         max_time_ms : int | None
-            Server-side time budget. ``None`` or ``0`` removes it.
+            Server-side time budget. ``None`` or ``0`` leaves the API's
+            default of 30 s.
         """
         return cast(
             list[dict[str, Any]],
