@@ -10,6 +10,7 @@ import pytest
 from astropy.coordinates import SkyCoord
 
 from boom.client import (
+    MAX_CONE_SEARCH_POSITIONS,
     BoomClient,
     arcsec_to_metres,
     get_user_agent,
@@ -301,6 +302,28 @@ def test_cone_search_accepts_a_skycoord(client, api):
         "ZTF_alerts_aux", SkyCoord(12.0, -30.0, unit="deg"), 2, "arcsec"
     )
     assert api.body()["object_coordinates"] == {"0": [12.0, -30.0]}
+
+
+def test_cone_search_splits_positions_the_api_would_refuse(client, api):
+    def answer(request):
+        names = json.loads(request.content)["object_coordinates"]
+        return httpx.Response(
+            200,
+            json={"message": "success", "data": {n: [] for n in names}},
+        )
+
+    api.route("/queries/cone_search", handler=answer)
+    positions = [
+        (float(i % 360), 0.0) for i in range(MAX_CONE_SEARCH_POSITIONS + 1)
+    ]
+    results = client.cone_search("ZTF_alerts_aux", positions, 2, "arcsec")
+    sizes = [
+        len(json.loads(r.content)["object_coordinates"])
+        for r in api.requests
+        if r.url.path == "/queries/cone_search"
+    ]
+    assert sizes == [MAX_CONE_SEARCH_POSITIONS, 1]
+    assert len(results) == MAX_CONE_SEARCH_POSITIONS + 1
 
 
 # ---- near search ----

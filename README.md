@@ -264,11 +264,13 @@ their own text is a good way to serve stale results without noticing.
 
 ## Things to know before you hammer the API
 
-- **Nothing bounds a query server-side.** The API applies no maximum
-  `limit` and no default time budget, so an unselective filter on an
-  unindexed field runs as a collection scan against production Mongo.
-  This client sends `max_time_ms=60000` by default; pass
-  `max_time_ms=None` to remove it, deliberately.
+- **The API bounds every query.** A query without its own `max_time_ms`
+  stops after 30 seconds; this client sends 60000 by default. An answer
+  over 256 MB is refused with a 400 that asks for a `limit`, paging or
+  fewer projected fields. A cone search takes at most 10000 positions per
+  request, so this client splits larger ones. While 8 large queries are
+  running, the next one waits up to a minute and then gets a 503, which
+  this client retries.
 - **`$out` and `$merge` write to the database.** The server passes
   pipeline stages straight to Mongo with no allowlist. This client
   refuses those two stages; everything else is on you.
