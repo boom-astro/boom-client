@@ -45,6 +45,9 @@ MAX_CONE_SEARCH_POSITIONS = 10_000
 #: Most alerts the API accepts in one batch cutout request.
 MAX_BATCH_CUTOUTS = 100
 
+#: Most tracks the API returns in one page.
+MAX_TRACKS_PAGE = 500
+
 #: Mean Earth radius in metres. Mongo measures ``$nearSphere`` distances on
 #: a sphere of this size, so an angular radius has to be converted.
 EARTH_RADIUS_M = 6371008.8
@@ -751,6 +754,109 @@ class BoomClient:
                 results[int(cutouts["candid"])] = _decode_cutouts(cutouts)
         return results
 
+    # ---- tracks ----
+
+    def tracks(
+        self,
+        survey: Survey = "ZTF",
+        *,
+        updated_since: float | None = None,
+        after_id: str | None = None,
+        unknown_only: bool | None = None,
+        min_e: float | None = None,
+        max_q: float | None = None,
+        min_nights: int | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        """Fetch one page of linked moving-object tracks, oldest write first.
+
+        Parameters
+        ----------
+        survey : str
+            Only ``"ZTF"`` has tracks.
+        updated_since : float | None
+            Tracks written at or after this Unix time (server default: one
+            day ago).
+        after_id : str | None
+            With *updated_since*, skip the tracks written at exactly that
+            time up to this id.
+        unknown_only : bool | None
+            Only tracks not matched to a known object.
+        min_e, max_q : float | None
+            Cuts on the stored orbit: minimum eccentricity (1 for unbound)
+            and maximum perihelion distance in au.
+        min_nights : int | None
+            Minimum number of nights.
+        limit : int | None
+            Page size, at most :data:`MAX_TRACKS_PAGE` (server default 50).
+
+        Returns
+        -------
+        dict
+            ``tracks`` and, under ``next``, the ``updated_since`` and
+            ``after_id`` to pass to get the following page or, for a short
+            page, to poll for new tracks later.
+        """
+        return cast(
+            dict[str, Any],
+            self._request(
+                "GET",
+                f"/surveys/{survey.lower()}/tracks",
+                params=_drop_none(
+                    {
+                        "updated_since": updated_since,
+                        "after_id": after_id,
+                        "unknown_only": unknown_only,
+                        "min_e": min_e,
+                        "max_q": max_q,
+                        "min_nights": min_nights,
+                        "limit": limit,
+                    }
+                ),
+            ),
+        )
+
+    def iter_tracks(
+        self,
+        survey: Survey = "ZTF",
+        *,
+        updated_since: float | None = None,
+        unknown_only: bool | None = None,
+        min_e: float | None = None,
+        max_q: float | None = None,
+        min_nights: int | None = None,
+        page_size: int = MAX_TRACKS_PAGE,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield every track written since *updated_since*, page by page."""
+        after_id: str | None = None
+        while True:
+            page = self.tracks(
+                survey,
+                updated_since=updated_since,
+                after_id=after_id,
+                unknown_only=unknown_only,
+                min_e=min_e,
+                max_q=max_q,
+                min_nights=min_nights,
+                limit=page_size,
+            )
+            tracks = page.get("tracks", [])
+            yield from tracks
+            cursor = page.get("next")
+            if len(tracks) < page_size or not cursor:
+                return
+            updated_since = cursor["updated_since"]
+            after_id = cursor["after_id"]
+
+    def track(self, survey: Survey, track_id: str) -> dict[str, Any]:
+        """Fetch one track, with all of its members, by id."""
+        return cast(
+            dict[str, Any],
+            self._request(
+                "GET", f"/surveys/{survey.lower()}/tracks/{track_id}"
+            ),
+        )
+
     # ---- misc ----
 
     def health(self) -> Any:
@@ -858,6 +964,7 @@ __all__ = [
     "EARTH_RADIUS_M",
     "MAX_BATCH_CUTOUTS",
     "MAX_CONE_SEARCH_POSITIONS",
+    "MAX_TRACKS_PAGE",
     "Survey",
     "WhichCutouts",
     "arcsec_to_metres",
