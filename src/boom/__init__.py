@@ -11,8 +11,14 @@ have a Babamul account, this package cannot authenticate you: use the
 package builds on it and reuses its models and plotting.
 """
 
+from ._version_check import check_version
 from .cache import Cache
-from .client import BoomClient, arcsec_to_metres, get_user_agent
+from .client import (
+    BoomClient,
+    arcsec_to_metres,
+    get_user_agent,
+    get_version,
+)
 from .config import API_URLS, BoomConfig, get_base_url
 from .exceptions import (
     APIAuthenticationError,
@@ -36,6 +42,8 @@ from .objects import (
 )
 from .photometry import CUTS, QualityCuts, build_photometry
 from .projections import alert_projection, aux_projection
+
+check_version(get_version())
 
 __all__ = [
     "API_URLS",
