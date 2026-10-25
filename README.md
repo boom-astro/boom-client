@@ -54,6 +54,7 @@ pip install boom-client
 | `BOOM_API_URL` | Full base URL override, wins over `BOOM_ENV` |
 | `BOOM_CACHE_DIR` | Enables the on-disk cache. Unset means no caching |
 | `BOOM_CACHE_MAX_AGE` | Cache entry lifetime in seconds (default 86400) |
+| `BOOM_NO_VERSION_CHECK` | Set to `1` to stop asking PyPI, once a day on import, whether a newer release is out |
 
 Credentials can also be passed directly:
 
