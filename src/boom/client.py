@@ -42,6 +42,9 @@ DEFAULT_PAGE_SIZE = 1000
 #: Most positions the API accepts in one cone search request.
 MAX_CONE_SEARCH_POSITIONS = 10_000
 
+#: Most alerts the API accepts in one batch cutout request.
+MAX_BATCH_CUTOUTS = 100
+
 #: Mean Earth radius in metres. Mongo measures ``$nearSphere`` distances on
 #: a sphere of this size, so an angular radius has to be converted.
 EARTH_RADIUS_M = 6371008.8
@@ -718,10 +721,35 @@ class BoomClient:
                 ),
             ),
         )
-        for key in ("cutoutScience", "cutoutTemplate", "cutoutDifference"):
-            if isinstance(payload.get(key), str):
-                payload[key] = base64.b64decode(payload[key])
-        return payload
+        return _decode_cutouts(payload)
+
+    def batch_cutouts(
+        self, survey: Survey, candids: Sequence[int]
+    ) -> dict[int, dict[str, Any]]:
+        """Fetch the cutouts of many alerts, keyed by candid.
+
+        Alerts without cutouts are left out. More than
+        :data:`MAX_BATCH_CUTOUTS` candids are sent as several requests.
+        Each payload is decoded like :meth:`cutouts` and also carries the
+        alert's ``jd``.
+        """
+        results: dict[int, dict[str, Any]] = {}
+        for start in range(0, len(candids), MAX_BATCH_CUTOUTS):
+            payload = cast(
+                dict[str, Any],
+                self._request(
+                    "POST",
+                    f"/surveys/{survey.lower()}/cutouts",
+                    json={
+                        "candids": list(
+                            candids[start : start + MAX_BATCH_CUTOUTS]
+                        )
+                    },
+                ),
+            )
+            for cutouts in payload.get("cutouts", []):
+                results[int(cutouts["candid"])] = _decode_cutouts(cutouts)
+        return results
 
     # ---- misc ----
 
@@ -756,6 +784,13 @@ def _with_separation(
         **match,
         "distance_arcsec": float(centre.separation(other).arcsec),
     }
+
+
+def _decode_cutouts(payload: dict[str, Any]) -> dict[str, Any]:
+    for key in ("cutoutScience", "cutoutTemplate", "cutoutDifference"):
+        if isinstance(payload.get(key), str):
+            payload[key] = base64.b64decode(payload[key])
+    return payload
 
 
 def _normalize_sort(
@@ -821,6 +856,7 @@ __all__ = [
     "DEFAULT_MAX_TIME_MS",
     "DEFAULT_PAGE_SIZE",
     "EARTH_RADIUS_M",
+    "MAX_BATCH_CUTOUTS",
     "MAX_CONE_SEARCH_POSITIONS",
     "Survey",
     "WhichCutouts",
