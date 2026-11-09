@@ -136,6 +136,29 @@ client.pipeline("ZTF_alerts", [
 ])
 ```
 
+### Testing a filter
+
+Runs a filter pipeline on stored alerts, as the filter worker would, without
+saving it. Times are JDs, ISO strings, datetimes or astropy `Time`.
+
+```python
+pipeline = json.load(open("my_filter.json"))
+
+client.test_filter("LSST", pipeline, start="2026-07-01", end="2026-07-02")
+client.count_filter("ZTF", pipeline, start=2461000.5, end=2461003.5, programids=[1, 2])
+client.test_filter("LSST", pipeline, object_ids=["170635513149522077"])
+```
+
+One request covers at most 7 days. `iter_filter` takes any range, sends it in
+windows of `window` days (1 by default) and splits a window in half when its
+results are too large for one response, so nothing is truncated:
+
+```python
+alerts = list(client.iter_filter("LSST", pipeline, "2026-03-01", "2026-07-01"))
+```
+
+ZTF filters need `programids` (1 public, 2 partnership, 3 Caltech).
+
 ### Inspecting catalogs
 
 ```python
