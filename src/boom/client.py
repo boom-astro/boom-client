@@ -48,6 +48,9 @@ MAX_BATCH_CUTOUTS = 100
 #: Most tracks the API returns in one page.
 MAX_TRACKS_PAGE = 500
 
+MAX_FILTER_TEST_DAYS = 7.0
+MIN_FILTER_TEST_DAYS = 1.0 / 1440.0
+
 #: Mean Earth radius in metres. Mongo measures ``$nearSphere`` distances on
 #: a sphere of this size, so an angular radius has to be converted.
 EARTH_RADIUS_M = 6371008.8
@@ -167,6 +170,44 @@ def normalize_coordinates(
 
 def _drop_none(body: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in body.items() if v is not None}
+
+
+def to_jd(value: Any) -> float:
+    """Turn a JD, an ISO string, a datetime or an astropy Time into a UTC JD."""
+    if isinstance(value, int | float):
+        return float(value)
+
+    from astropy.time import Time
+
+    return float(Time(value, scale="utc").jd)
+
+
+def _filter_test_body(
+    survey: Survey,
+    pipeline: list[dict[str, Any]],
+    start: Any,
+    end: Any,
+    object_ids: Sequence[str] | None,
+    candids: Sequence[int] | None,
+    programids: Sequence[int] | None,
+) -> dict[str, Any]:
+    return _drop_none(
+        {
+            "survey": survey,
+            "pipeline": pipeline,
+            "permissions": (
+                {survey: list(programids)} if programids is not None else {}
+            ),
+            "start_jd": None if start is None else to_jd(start),
+            "end_jd": None if end is None else to_jd(end),
+            "object_ids": None if object_ids is None else list(object_ids),
+            "candids": (
+                None
+                if candids is None
+                else [str(candid) for candid in candids]
+            ),
+        }
+    )
 
 
 class BoomClient:
@@ -645,6 +686,164 @@ class BoomClient:
             ),
         )
 
+    def test_filter(
+        self,
+        survey: Survey,
+        pipeline: list[dict[str, Any]],
+        *,
+        start: Any = None,
+        end: Any = None,
+        object_ids: Sequence[str] | None = None,
+        candids: Sequence[int] | None = None,
+        programids: Sequence[int] | None = None,
+        sort_by: str | None = None,
+        sort_order: int | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Run a filter pipeline on stored alerts, without saving the filter.
+
+        The pipeline runs on the ``<survey>_alerts`` collection exactly as
+        the filter worker would run it, with its usual lookups of the aux
+        document, and returns what its final stage outputs.
+
+        Parameters
+        ----------
+        survey : str
+            Survey whose alerts the filter runs on.
+        pipeline : list[dict]
+            The filter's aggregation pipeline, starting with a ``$match``.
+        start, end : float | str | datetime | astropy.time.Time | None
+            Alert time range, both ends included. A number is a JD, anything
+            else goes through :func:`to_jd`. At most
+            :data:`MAX_FILTER_TEST_DAYS` apart: use :meth:`iter_filter` for
+            longer ranges.
+        object_ids : Sequence[str] | None
+            Only alerts of these objects, at most 1000.
+        candids : Sequence[int] | None
+            Only these alerts, at most 100000.
+        programids : Sequence[int] | None
+            ZTF program ids the filter may see (1 public, 2 partnership,
+            3 Caltech). Required for ZTF, ignored by the other surveys.
+        sort_by : str | None
+            Alert field to sort on before the pipeline runs, e.g.
+            ``"candidate.jd"``.
+        sort_order : int | None
+            ``1`` (default) or ``-1``.
+        limit : int | None
+            Most results to return.
+
+        At least one of the time range, *object_ids* or *candids* is
+        required.
+        """
+        body = _filter_test_body(
+            survey, pipeline, start, end, object_ids, candids, programids
+        )
+        body.update(
+            _drop_none(
+                {"sort_by": sort_by, "sort_order": sort_order, "limit": limit}
+            )
+        )
+        data = self._request("POST", "/filters/test", json=body)
+        return cast(list[dict[str, Any]], data["results"])
+
+    def count_filter(
+        self,
+        survey: Survey,
+        pipeline: list[dict[str, Any]],
+        *,
+        start: Any = None,
+        end: Any = None,
+        object_ids: Sequence[str] | None = None,
+        candids: Sequence[int] | None = None,
+        programids: Sequence[int] | None = None,
+    ) -> int:
+        """Count the alerts :meth:`test_filter` would return, without a limit."""
+        data = self._request(
+            "POST",
+            "/filters/test/count",
+            json=_filter_test_body(
+                survey, pipeline, start, end, object_ids, candids, programids
+            ),
+        )
+        return int(data["count"])
+
+    def iter_filter(
+        self,
+        survey: Survey,
+        pipeline: list[dict[str, Any]],
+        start: Any,
+        end: Any,
+        *,
+        programids: Sequence[int] | None = None,
+        window: float = 1.0,
+    ) -> Iterator[dict[str, Any]]:
+        """Run a filter over a time range of any length, window by window.
+
+        The range is cut into windows of *window* days, at most
+        :data:`MAX_FILTER_TEST_DAYS`, each sent to :meth:`test_filter` in
+        time order. A window whose results are too large for one response
+        is split in half until they fit, so nothing is truncated. An alert
+        sitting exactly on the boundary of two windows is yielded once.
+        """
+        if not 0 < window <= MAX_FILTER_TEST_DAYS:
+            raise ValueError(
+                f"window must be in (0, {MAX_FILTER_TEST_DAYS}] days"
+            )
+        start_jd, end_jd = to_jd(start), to_jd(end)
+        if end_jd <= start_jd:
+            raise ValueError("end must be after start")
+
+        previous: set[Any] = set()
+        window_start = start_jd
+        while window_start < end_jd:
+            window_end = min(window_start + window, end_jd)
+            current: set[Any] = set()
+            for alert in self._filter_window(
+                survey, pipeline, window_start, window_end, programids
+            ):
+                alert_id = alert.get("_id")
+                if alert_id is not None:
+                    if alert_id in previous:
+                        continue
+                    current.add(alert_id)
+                yield alert
+            previous = current
+            window_start = window_end
+
+    def _filter_window(
+        self,
+        survey: Survey,
+        pipeline: list[dict[str, Any]],
+        start_jd: float,
+        end_jd: float,
+        programids: Sequence[int] | None,
+    ) -> list[dict[str, Any]]:
+        try:
+            return self.test_filter(
+                survey,
+                pipeline,
+                start=start_jd,
+                end=end_jd,
+                programids=programids,
+            )
+        except QueryError as error:
+            if (
+                "Results exceed" not in str(error)
+                or end_jd - start_jd < 2 * MIN_FILTER_TEST_DAYS
+            ):
+                raise
+        middle = (start_jd + end_jd) / 2
+        first = self._filter_window(
+            survey, pipeline, start_jd, middle, programids
+        )
+        seen = {alert.get("_id") for alert in first} - {None}
+        second = self._filter_window(
+            survey, pipeline, middle, end_jd, programids
+        )
+        return first + [
+            alert for alert in second if alert.get("_id") not in seen
+        ]
+
     # ---- catalogs ----
 
     def catalogs(self, *, details: bool = False) -> list[dict[str, Any]]:
@@ -964,6 +1163,7 @@ __all__ = [
     "EARTH_RADIUS_M",
     "MAX_BATCH_CUTOUTS",
     "MAX_CONE_SEARCH_POSITIONS",
+    "MAX_FILTER_TEST_DAYS",
     "MAX_TRACKS_PAGE",
     "Survey",
     "WhichCutouts",
@@ -972,4 +1172,5 @@ __all__ = [
     "normalize_coordinates",
     "normalize_radius",
     "normalize_unit",
+    "to_jd",
 ]
