@@ -174,7 +174,7 @@ def _drop_none(body: dict[str, Any]) -> dict[str, Any]:
 
 def to_jd(value: Any) -> float:
     """Turn a JD, an ISO string, a datetime or an astropy Time into a UTC JD."""
-    if isinstance(value, (int, float)):
+    if isinstance(value, int | float):
         return float(value)
 
     from astropy.time import Time
